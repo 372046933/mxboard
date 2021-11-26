@@ -39,9 +39,12 @@ class RecordWriter(object):
         self._writer = None
         try:
             parse_result = six.moves.urllib.parse.urlparse(path)
-            if parse_result.scheme == '':
+            ai_department_prefix = '/department/ai'
+            if parse_result.scheme == '' and not parse_result.path.startswith(
+                ai_department_prefix):
                 self._writer = open(path, 'wb')
-            elif parse_result.scheme in ('hdfs', 'viewfs'):
+            elif parse_result.scheme in ('hdfs', 'viewfs') \
+                 or parse_result.path.startswith(ai_department_prefix):
                 import pyarrow.fs
                 # Use fs.defaultFS from core-site.xml
                 hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)

@@ -131,10 +131,12 @@ class EventFileWriter(object):
         """
         self._logdir = logdir
         parse_result = six.moves.urllib.parse.urlparse(self._logdir)
-        if parse_result.scheme == '':
+        if parse_result.scheme == '' and not parse_result.path.startswith(
+            '/department/ai'):
             if not os.path.exists(self._logdir):
                 os.makedirs(self._logdir)
-        elif parse_result.scheme in ('hdfs', 'viewfs'):
+        elif parse_result.scheme in ('hdfs', 'viewfs') \
+            or parse_result.path.startswith('/department/ai'):
             import pyarrow.fs
             hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)
             hdfs.create_dir(parse_result.path)
