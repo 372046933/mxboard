@@ -21,7 +21,9 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import datetime
 import logging
+import os
 import os.path
 import socket
 import threading
@@ -121,6 +123,11 @@ class EventFileWriter(object):
     is encoded using the tfrecord format, which is similar to RecordIO.
     """
 
+    EVENT_SIZE_LIMIT = 1 << 30
+    EVENT_FILE_SIZE_LIMIT = 1 << 31
+    EVENT_DIR_SIZE_LIMIT = 1 << 32
+    EVENT_FILE_NAME_PREFIX = 'events.out.tfevents.'
+
     def __init__(self, logdir, max_queue=10, flush_secs=120, filename_suffix=None, verbose=True):
         """Creates a `EventFileWriter` and an event file to write to.
         On construction the summary writer creates a new event file in `logdir`.
@@ -140,6 +147,8 @@ class EventFileWriter(object):
             import pyarrow.fs
             hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)
             hdfs.create_dir(parse_result.path)
+        self._scheme = parse_result.scheme
+        self._path = parse_result.path
 
         self._event_queue = six.moves.queue.Queue(max_queue)
         self._ev_writer = EventsWriter(os.path.join(self._logdir, "events"), verbose=verbose)
@@ -152,6 +161,9 @@ class EventFileWriter(object):
                                           self._flush_secs, self._sentinel_event)
 
         self._worker.start()
+        self._total_bytes = 0
+        self._logger = logging.getLogger(self.__class__.__name__)
+        self._logger.setLevel(logging.INFO)
 
     def get_logdir(self):
         """Returns the directory where event file will be written."""
@@ -171,8 +183,111 @@ class EventFileWriter(object):
 
     def add_event(self, event):
         """Adds an event to the event file."""
-        if not self._closed:
+        # Limit single event size within 1GB
+        if event.ByteSize() > self.EVENT_SIZE_LIMIT:
+            self._logger.warning('Event size %d larger than %d, event is dropped',
+                                 event.ByteSize(), self.EVENT_SIZE_LIMIT)
+            return
+        if self._closed:
+            self._logger.warning('Writer closed, event is dropped')
+            return
+
+        # Limit hourly events size within 2GB
+        if self._total_bytes + event.ByteSize() > self.EVENT_FILE_SIZE_LIMIT:
+            if not self.event_file_span_hour():
+                self._logger.warning(
+                    'Events file larger than %d, event is dropped',
+                    self.EVENT_FILE_SIZE_LIMIT)
+            else:
+                # Open a new events file writer
+                self._logger.info('Will write a new events file')
+                self.close()
+                self.reopen()
+                self.maybe_move_to_archive()
+                self._total_bytes = event.ByteSize()
+                self._event_queue.put(event)
+        else:
+            # File size within 2GB, do not check span hour
             self._event_queue.put(event)
+            self._total_bytes += event.ByteSize()
+
+    def event_file_span_hour(self):
+        if self._total_bytes == 0:
+            return False
+        if not hasattr(self._ev_writer, '_filename'):
+            return False
+        time_int = int(time.time())
+        # events file name looks line log_dir/events.out.tfevents...
+        events_file_time = int(
+            self._ev_writer._filename[self._ev_writer._filename.find(
+                self.EVENT_FILE_NAME_PREFIX):].split('.')[3])
+        return time_int - events_file_time > 3600
+
+    def maybe_move_to_archive(self):
+        """# Limit total events file size to 4GB under `self._logdir`
+        """
+        if self._scheme == '':
+            self._move_local()
+        elif self._scheme in ('hdfs', 'viewfs'):
+            self._move_hdfs()
+        else:
+            raise ValueError("Unsupported scheme:%s" % self._scheme)
+
+    def _move_local(self):
+        total_bytes = 0
+        needs_to_move = []
+        events_file_name = list(
+            filter(lambda x: x.startswith(self.EVENT_FILE_NAME_PREFIX),
+                   os.listdir(self._path)))
+        events_file_size = {
+            fname: os.path.getsize(os.path.join(self._path, fname))
+            for fname in events_file_name
+        }
+        for _, sz in six.iteritems(events_file_size):
+            total_bytes += sz
+        if total_bytes <= self.EVENT_DIR_SIZE_LIMIT:
+            return
+
+        while total_bytes > self.EVENT_DIR_SIZE_LIMIT:
+            total_bytes -= events_file_size[events_file_name[0]]
+            needs_to_move.append(events_file_name[0])
+            events_file_name.pop(0)
+        self._logger.info('Needs to move %s', needs_to_move)
+        archive_path = self._path + '_' + 'archive'
+        os.makedirs(archive_path, exist_ok=True)
+        for fname in needs_to_move:
+            self._logger.info('Move %s to %s', os.path.join(self._path, fname),
+                              os.path.join(archive_path, fname))
+            os.rename(os.path.join(self._path, fname),
+                        os.path.join(archive_path, fname))
+
+    def _move_hdfs(self):
+        import pyarrow.fs
+        total_bytes = 0
+        needs_to_move = []
+        fs_ = pyarrow.fs.HadoopFileSystem(host='default', port=0)
+        events_file_info = list(
+            filter(
+                lambda x: x.type == pyarrow.fs.FileType.File and x.base_name.
+                startswith(self.EVENT_FILE_NAME_PREFIX),
+                fs_.get_file_info(
+                    pyarrow.fs.FileSelector(self._path, recursive=True))))
+        for finfo in events_file_info:
+            total_bytes += finfo.size
+        if total_bytes <= self.EVENT_DIR_SIZE_LIMIT:
+            return
+
+        while total_bytes > self.EVENT_DIR_SIZE_LIMIT:
+            total_bytes -= events_file_info[0].size
+            needs_to_move.append(events_file_info[0])
+            events_file_info.pop(0)
+        self._logger.info('Needs to move %s', needs_to_move)
+        archive_path = self._path + '_' + 'archive'
+        fs_.create_dir(archive_path)
+        for finfo in needs_to_move:
+            self._logger.info('Move %s to %s', finfo.path,
+                              os.path.join(archive_path, finfo.base_name))
+            fs_.move(finfo.path, os.path.join(archive_path, finfo.base_name))
 
     def flush(self):
         """Flushes the event file to disk.
