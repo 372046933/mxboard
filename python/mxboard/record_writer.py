@@ -21,6 +21,7 @@ from __future__ import absolute_import
 import six
 import struct
 from ._crc32c import crc32c
+from . import file_io
 
 
 class RecordWriter(object):
@@ -38,17 +39,7 @@ class RecordWriter(object):
     def __init__(self, path):
         self._writer = None
         try:
-            parse_result = six.moves.urllib.parse.urlparse(path)
-            ai_department_prefix = '/department/ai'
-            if parse_result.scheme == '' and not parse_result.path.startswith(
-                ai_department_prefix):
-                self._writer = open(path, 'wb')
-            elif parse_result.scheme in ('hdfs', 'viewfs') \
-                 or parse_result.path.startswith(ai_department_prefix):
-                import pyarrow.fs
-                # Use fs.defaultFS from core-site.xml
-                hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)
-                self._writer = hdfs.open_output_stream(parse_result.path)
+            self._writer = file_io.open(path, 'wb')
         except (OSError, IOError) as err:
             raise ValueError('failed to open file {}: {}'.format(path, str(err)))
 

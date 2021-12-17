@@ -21,7 +21,6 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
-import datetime
 import logging
 import os
 import os.path
@@ -33,6 +32,7 @@ import six
 
 from .proto import event_pb2
 from .record_writer import RecordWriter
+from . import file_io
 
 logging.basicConfig()
 
@@ -137,16 +137,8 @@ class EventFileWriter(object):
         the event file:
         """
         self._logdir = logdir
+        file_io.makedirs(logdir)
         parse_result = six.moves.urllib.parse.urlparse(self._logdir)
-        if parse_result.scheme == '' and not parse_result.path.startswith(
-            '/department/ai'):
-            if not os.path.exists(self._logdir):
-                os.makedirs(self._logdir)
-        elif parse_result.scheme in ('hdfs', 'viewfs') \
-            or parse_result.path.startswith('/department/ai'):
-            import pyarrow.fs
-            hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)
-            hdfs.create_dir(parse_result.path)
         self._scheme = parse_result.scheme
         self._path = parse_result.path
 
@@ -225,6 +217,7 @@ class EventFileWriter(object):
 
     def maybe_move_to_archive(self):
         """# Limit total events file size to 4GB under `self._logdir`
+           If limit reached, move those files to `self._logdir + _ + archive`
         """
         if self._scheme == '':
             self._move_local()

@@ -23,6 +23,7 @@ import logging
 import numpy as np
 from numpy.core.numeric import full
 import six
+from . import file_io
 
 
 try:
@@ -206,7 +207,6 @@ def _save_image(image, filename, nrow=8, padding=2, square_image=True):
     if parse_result.scheme == '':
         im.save(filename)
     elif parse_result.scheme in ('hdfs', 'viewfs'):
-        import pyarrow.fs
         # PIL does not support write to a HDFS stream
         # Write to local first
         import tempfile
@@ -215,10 +215,8 @@ def _save_image(image, filename, nrow=8, padding=2, square_image=True):
             with open(os.path.join(tmpdir, filename_tail), 'wb') as fp:
                 im.save(fp)
             with open(os.path.join(tmpdir, filename_tail), 'rb') as fp:
-                hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)
-                hdfs_fp = hdfs.open_output_stream(parse_result.path)
-                hdfs_fp.write(fp.read())
-                hdfs_fp.close()
+                with file_io.open(filename, 'wb') as hdfs_fp:
+                    hdfs_fp.write(fp.read())
 
 
 
@@ -274,18 +272,11 @@ def _make_metadata_tsv(metadata, save_path):
 
     if len(metadata.shape) == 1:
         metadata = metadata.reshape(-1, 1)
-    parse_result = six.moves.urllib.parse.urlparse(save_path)
-    if parse_result.scheme == '':
-        with open(os.path.join(save_path, 'metadata.tsv'), 'w') as f:
-            for row in metadata:
-                f.write('\t'.join([str(x) for x in row]) + '\n')
-    elif parse_result.scheme in ('hdfs', 'viewfs'):
-        import pyarrow.fs
-        hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)
-        hdfs_fp = hdfs.open_output_stream(os.path.join(parse_result.path, 'metadata.tsv'))
+
+    with file_io.open(save_path, 'wb') as fp:
         for row in metadata:
-            hdfs_fp.write('\t'.join([str(x) for x in row]).encode() + b'\n')
-        hdfs_fp.close()
+            fp.write(six.ensure_binary('\t'.join([str(x) for x in row])) + b'\n')
+
 
 def _make_sprite_image(images, save_path):
     """Given an NDArray as a batch images, make a sprite image out of it following the rule
@@ -333,22 +324,9 @@ def _add_embedding_config(file_path, data_dir, has_metadata=False, label_img_sha
             s += 'single_image_dim: {}\n'.format(label_img_shape[2])
             s += '}\n'
     s += '}\n'
-    parse_result = six.moves.urllib.parse.urlparse(file_path)
-    if parse_result.scheme == '':
-        with open(os.path.join(file_path, 'projector_config.pbtxt'), 'a') as f:
-            f.write(s)
-    elif parse_result.scheme in ('hdfs', 'viewfs'):
-        import pyarrow.fs
-        hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)
-        full_path = os.path.join(parse_result.path, 'projector_config.pbtxt')
-        # open_append_stream does not create empty file if target does not exist
-        # See https://issues.apache.org/jira/browse/ARROW-14925
-        if hdfs.get_file_info(full_path).type == pyarrow.fs.FileType.NotFound:
-            hdfs_fp = hdfs.open_output_stream(full_path)
-        else:
-            hdfs_fp = hdfs.open_append_stream(full_path)
-        hdfs_fp.write(s.encode())
-        hdfs_fp.close()
+    with file_io.open(os.path.join(file_path, 'projector_config.pbtxt'),
+                      'ab') as fp:
+        fp.write(six.ensure_binary(s))
 
 
 def _save_embedding_tsv(data, file_path):
@@ -361,17 +339,7 @@ def _save_embedding_tsv(data, file_path):
     else:
         raise TypeError('expected NDArray of np.ndarray, while received type {}'.format(
             str(type(data))))
-    parse_result = six.moves.urllib.parse.urlparse(file_path)
-    if parse_result.scheme == '':
-        with open(os.path.join(file_path, 'tensors.tsv'), 'w') as f:
-            for x in data_list:
-                x = [str(i) for i in x]
-                f.write('\t'.join(x) + '\n')
-    elif parse_result.scheme in ('hdfs', 'viewfs'):
-        import pyarrow.fs
-        hdfs = pyarrow.fs.HadoopFileSystem(host='default', port=0)
-        hdfs_fp = hdfs.open_output_stream(os.path.join(parse_result.path, 'tensors.tsv'))
+    with file_io.open(os.path.join(file_path, 'tensors.tsv'), 'wb') as fp:
         for x in data_list:
             x = [str(i) for i in x]
-            hdfs_fp.write('\t'.join(x).encode() + b'\n')
-        hdfs_fp.close()
+            fp.write(six.ensure_binary('\t'.join(x)) + b'\n')
